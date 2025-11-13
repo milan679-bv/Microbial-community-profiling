@@ -1,0 +1,8 @@
+# Ignore all files
+*
+
+# Except R scripts
+!*.R
+
+# Don't ignore .gitignore itself
+!.gitignore
