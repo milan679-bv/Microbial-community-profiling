@@ -1,0 +1,299 @@
+---
+title: "Substrate chemistry Incubation"
+author: "Milan"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r, setup, include=FALSE, echo=F}
+windowsFonts(Times=windowsFont("times"))
+
+# clean workspace
+rm(list = ls()); gc()
+
+load.lib <- c('tidyverse','ggtext','pals','ggalluvial','glue','microeco','file2meco','magrittr','readxl','cowplot')
+sapply(load.lib,require,character=TRUE)
+
+# Set working directory
+knitr::opts_knit$set(root.dir = r"(D:\OneDrive - Universität Bayreuth\Work\PostDoc\Bayreuth\Data_analysis\WP1\)")
+
+# Clear environment
+rm(list = ls())
+
+theme_my=theme_classic() +
+  theme(plot.title = element_markdown(family = "Times",
+                                      size=32,
+                                      color="black",hjust = 0.5),
+        legend.text = element_markdown(family = "Times",
+                                       size=30,
+                                       color="black"),
+        legend.title = element_markdown(face="bold",
+                                        family = "Times",
+                                        size=36,
+                                        color="black"),
+        legend.key.size = unit(20, "pt"),
+        axis.title = element_text(face="bold",
+                                  family = "Times",
+                                  size=16),
+        axis.text.y = element_text(face="bold",
+                                   family = "Times",
+                                   size=16,color="black"),
+        axis.text.x=element_text(face="bold",
+                                 family = "Times",
+                                 size=16,
+                                 color="black"))+
+  theme(panel.spacing.x = unit(3, "lines"))
+```
+
+```{r echo=F, warning=FALSE}
+abund_file_path <- "Substrate_4(Glu,GT,CA,Gly)_Chem_Incub//Seq_direct_PCR/Data/qiime/dada2OutPut/dada2_table.qza"
+sample_file_path <- "Substrate_4(Glu,GT,CA,Gly)_Chem_Incub//Seq_direct_PCR/Data/Mapping.txt"
+taxonomy_file_path <- "Substrate_4(Glu,GT,CA,Gly)_Chem_Incub//Seq_direct_PCR/Data/qiime/taxClassification/dada2_rep_set_classified.qza"
+tree_data <- "Substrate_4(Glu,GT,CA,Gly)_Chem_Incub//Seq_direct_PCR/Data/qiime/aligned2Tree/rooted_tree.qza"
+rep_data <- "Substrate_4(Glu,GT,CA,Gly)_Chem_Incub//Seq_direct_PCR/Data/qiime/dada2OutPut/dada2_rep_set.qza"
+
+df_qiime <- qiime2meco(abund_file_path, 
+                       sample_table = sample_file_path, 
+                       taxonomy_table = taxonomy_file_path, 
+                       phylo_tree = tree_data, 
+                       rep_fasta = rep_data, 
+                       auto_tidy = TRUE)
+
+```
+
+```{r echo=F, warning=FALSE}
+
+df_qiime$tax_table %<>% tidy_taxonomy
+tmp <- df_qiime$tax_table
+# search each row to add sth
+for(i in 1:nrow(tmp)){
+  if(any(grepl("__$", tmp[i, ]))){
+    matchall <- grep("__$", tmp[i, ])
+    tmp[i, matchall] <- paste0(tmp[i, matchall], "unclassified ", gsub(".__", "", tmp[i, matchall[1] - 1]))
+  }
+}
+# then reassign tmp to the raw table
+df_qiime$tax_table <- tmp
+
+df_qiime$tidy_dataset()
+```
+
+```{r echo=F, message=FALSE, warning=FALSE}
+metadata=data.frame(df_qiime$sample_table)
+metadata$sample_id=row.names(metadata)
+
+asv_counts <- t(df_qiime$otu_table)
+sample_ids <- rownames(df_qiime$otu_table)
+asv_info <- data.frame(ASV_ID = colnames(asv_counts), stringsAsFactors = FALSE)
+asv_info$ASV_Number <- paste("ASV", seq_len(ncol(asv_counts)), sep = "")
+asv_counts <- asv_counts[, match(asv_info$ASV_ID, colnames(asv_counts))]
+asv_counts <- as.data.frame(asv_counts)
+colnames(asv_counts) <- asv_info$ASV_Number
+asv_counts$sample_id <- row.names(metadata)
+
+taxonomy=data.frame(df_qiime$tax_table)
+
+row.names(taxonomy)=asv_info$ASV_Number
+taxonomy$asv=asv_info$ASV_Number
+colnames(taxonomy)=c("kingdom", "phylum", "class", "order", "family", "genus","species", "asv")
+
+taxonomy=taxonomy%>%
+  pivot_longer(-asv, 
+               names_to="taxa", 
+               values_to = "taxon")%>%
+  mutate(taxon=str_replace(taxon, "[a-z]__", ""),
+         taxon=str_replace_all(taxon, "unclassified.*", "Unclassified"))%>%
+  pivot_wider(names_from = "taxa",values_from = "taxon")
+
+taxonomy_sel=taxonomy%>%
+  select(phylum,class,order,family,genus)
+
+asv_counts <- asv_counts%>%
+  select(sample_id, starts_with("ASV")) %>%
+  pivot_longer(-sample_id, names_to="asv", values_to = "count")
+  
+
+
+asv_rel_abund <- inner_join(metadata, asv_counts, by="sample_id") %>%
+  inner_join(., taxonomy, by="asv") %>%
+  group_by(sample_id) %>%
+  mutate(rel_abund = count / sum(count)) %>%
+  ungroup() %>%
+  select(-count) %>%
+  pivot_longer(c("kingdom", "phylum", "class", "order", "family", "genus","species", "asv"),
+               names_to="level",
+               values_to="taxon") 
+```
+
+## Soil Vs Cell at Genus level
+
+```{r echo=F, fig.height=16, fig.width=16, message=FALSE, warning=FALSE}
+taxon_rel_abund=asv_rel_abund %>%
+  filter(Treatment%in%c("Soil","Initial"))%>%
+  filter(level=="genus") %>%
+  group_by(Treatment, sample_id, taxon) %>%
+  summarize(rel_abund = sum(rel_abund), .groups="drop") %>%
+  group_by(Treatment, taxon) %>%
+  summarize(mean_rel_abund = 100*mean(rel_abund), .groups="drop")
+
+taxon_pool=taxon_rel_abund%>%
+  group_by(taxon)%>%
+  summarize(pool=max(mean_rel_abund)<0.5, .groups = "drop")
+
+df_join=inner_join(taxon_rel_abund,taxon_pool, by="taxon")%>%
+  mutate(taxon=if_else(pool, "Other (< 0.5%)",taxon))%>%
+  group_by(Treatment,taxon)%>%
+  summarize(mean_rel_abund=sum(mean_rel_abund))
+
+df_genus=cbind(df_join,taxonomy_sel[match(df_join$taxon,
+                                          taxonomy_sel$genus),])
+
+df_genus=data.frame(df_genus, stringsAsFactors = F)
+
+
+df_genus%>%
+  filter(taxon!="Unclassified")%>%
+  mutate(taxon = str_replace(taxon,
+                             "^([^<]*)$", "*\\1*"))%>%
+  mutate(`taxon2` = if_else(taxon=="Other (< 0.5%)","Other (< 0.5%)",
+                            if_else(taxon=="*Unclassified*","Unclassified",
+                                    paste0(taxon, " **(", phylum, ")**"))))%>%
+  arrange(phylum, taxon2)%>%
+  mutate(taxon2 = factor(taxon2, levels = unique(taxon2))) %>%
+  mutate(Treatment=recode(Treatment, "Initial"="Cell"),
+         Treatment=factor(Treatment, levels = c("Soil", "Cell")))%>%
+  ggplot(aes(x=Treatment, 
+             y=mean_rel_abund, 
+             stratum = taxon2, 
+             alluvium = taxon2,
+             label = taxon2,
+             fill = taxon2)) +
+  geom_flow(stat = "alluvium", lode.guidance = "frontback",
+            color = "black")+
+  geom_stratum() +
+  #geom_bar(stat = "identity",position = "fill", color="black")+
+  scale_fill_manual(name="Genus",values = c(as.vector(polychrome(28)),"gray"))+
+  #scale_y_continuous(expand = c(0,0))+
+  labs(x=NULL,
+       y="Mean Relative Abundance (%)") +
+  guides(fill=guide_legend(ncol=1))+
+  theme_my
+```
+
+## Incubation at genus level
+
+```{r echo=F, fig.height=10, fig.width=16, message=FALSE, warning=FALSE}
+taxon_rel_abund=asv_rel_abund %>%
+  filter(Treatment%in%c("Initial","After_1_day","Control","Glucose","Glutamine"))%>%
+  filter(level=="genus") %>%
+  #filter(taxon!="g__")%>%
+  #filter(taxon!="g__Pseudomonas")%>%
+  group_by(Treatment, sample_id, taxon) %>%
+  summarize(rel_abund = sum(rel_abund), .groups="drop") %>%
+  group_by(Treatment, taxon) %>%
+  summarize(mean_rel_abund = 100*mean(rel_abund), .groups="drop")
+
+taxon_pool=taxon_rel_abund%>%
+  group_by(taxon)%>%
+  summarize(pool=max(mean_rel_abund)<0.5, .groups = "drop")
+
+df_join=inner_join(taxon_rel_abund,taxon_pool, by="taxon")%>%
+  mutate(taxon=if_else(pool, "Other (< 0.5%)",taxon))%>%
+  group_by(Treatment,taxon)%>%
+  summarize(mean_rel_abund=sum(mean_rel_abund))
+
+df_genus=cbind(df_join,taxonomy_sel[match(df_join$taxon,
+                                          taxonomy_sel$genus),])
+
+df_genus=data.frame(df_genus, stringsAsFactors = F)
+
+
+df_genus%>%
+  filter(taxon!="Unclassified")%>%
+  mutate(taxon = str_replace(taxon,
+                             "^([^<]*)$", "*\\1*"))%>%
+  mutate(`taxon2` = if_else(taxon=="Other (< 0.5%)","Other (< 0.5%)",
+                            if_else(taxon=="*Unclassified*","Unclassified",
+                                    paste0(taxon, " **(", phylum, ")**"))))%>%
+  arrange(phylum, taxon2)%>%
+  mutate(taxon2 = factor(taxon2, levels = unique(taxon2))) %>%
+  mutate(Treatment=factor(Treatment, levels = c("Initial","After_1_day","Control","Glucose","Glutamine")),
+         Treatment=recode(Treatment, "After_1_day"="Before Incubation"))%>%
+  ggplot(aes(x=Treatment, 
+             y=mean_rel_abund, 
+             stratum = taxon2, 
+             alluvium = taxon2,
+             label = taxon2,
+             fill = taxon2)) +
+  geom_flow(stat = "alluvium", lode.guidance = "frontback",
+            color = "black")+
+  geom_stratum() +
+  #geom_bar(stat = "identity",position = "fill", color="black")+
+  scale_fill_manual(name="Genus",values = c(as.vector(polychrome(26)),"gray"))+
+  #scale_y_continuous(expand = c(0,0))+
+  labs(x=NULL,
+       y="Mean Relative Abundance (%)") +
+  guides(fill=guide_legend(ncol=1))+
+  theme_my
+  
+```
+
+## Really high abundance of Presudomonas, needs to be ploted separately
+
+```{r echo=F, fig.height=10, fig.width=16, message=FALSE, warning=FALSE}
+pseudomonas_small_plot <- df_genus %>%
+  filter(taxon == "Pseudomonas") %>%
+  mutate(Treatment=factor(Treatment, levels = c("Initial","After_1_day","Control","Glucose","Glutamine")),
+         Treatment=recode(Treatment, "After_1_day"="Before Incubation"))%>%
+  ggplot(aes(x = Treatment, y = mean_rel_abund, fill = taxon)) +
+  geom_bar(stat = "identity", color = "black") +
+  labs(x = NULL, y = NULL,title = "Pseudomonas") +
+  scale_fill_manual(values = "gray") +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+
+main_plot <- df_genus %>%
+  filter(taxon != "Pseudomonas") %>%
+  filter(taxon!="Unclassified")%>%
+  mutate(taxon = str_replace(taxon, "^([^<]*)$", "*\\1*")) %>%
+  mutate(`taxon2` = if_else(taxon == "Other (< 0.5%)", "Other (< 0.5%)",
+                            if_else(taxon == "*unidentified*", "unidentified",
+                                    glue("{taxon} **<span style = 'font-size:16pt'> ({phylum}) </span>**")))) %>%
+  arrange(phylum, taxon2)%>%
+  mutate(taxon2=factor(taxon2, levels = unique(taxon2)))%>%
+  mutate(Treatment=factor(Treatment, levels = c("Initial","After_1_day","Control","Glucose","Glutamine")),
+         Treatment=recode(Treatment, "After_1_day"="Before Incubation"))%>%
+  ggplot(aes(x = Treatment,
+             y = mean_rel_abund,
+             stratum = taxon2,
+             alluvium = taxon2,
+             label = taxon2,
+             fill = taxon2)) +
+  geom_flow(stat = "alluvium", lode.guidance = "frontback", color = "black") +
+  geom_stratum() +
+  scale_fill_manual(name = "Genus", values = c(as.vector(polychrome(26)), "gray")) +
+  #scale_y_continuous(expand = c(0, 0)) +
+  labs(x = NULL, y = "Mean Relative Abundance (%)") +
+  guides(fill = guide_legend(ncol = 1)) +
+  guides(fill=guide_legend(ncol=1))+
+  theme_my
+
+final_plot <- ggdraw() +
+  draw_plot(main_plot) +
+  draw_plot(pseudomonas_small_plot, x = 0.22, y = 0.8, width = 0.2, height = 0.2)
+
+print(final_plot)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

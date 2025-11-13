@@ -1,0 +1,147 @@
+#!/bin/bash
+
+mkdir /media/vol1/milan/PostDOC/Bayreuth/Experiment/Sub_2_Chemistry_Incub/qiime
+
+# Define input and output directories
+input_dir=/media/vol1/milan/PostDOC/Bayreuth/Experiment/Sub_2_Chemistry_Incub/raw
+output_dir=/media/vol1/milan/PostDOC/Bayreuth/Experiment/Sub_2_Chemistry_Incub/qiime
+manifest=/media/vol1/milan/PostDOC/Bayreuth/Experiment/Sub_2_Chemistry_Incub/Manifest_trimmed.txt
+metadata=/media/vol1/milan/PostDOC/Bayreuth/Experiment/Sub_2_Chemistry_Incub/Mapping.txt
+my_classifier=/media/vol1/milan/PostDOC/Bayreuth/Experiment/Database/silva-138-99-515-806-nb-classifier.qza
+
+
+# Create necessary directories
+mkdir -p $output_dir/ReadQC/rawFASTQCreports
+mkdir -p $output_dir/trimmedReads
+mkdir -p $output_dir/trimmedFastQC
+mkdir -p $output_dir/dada2visualizations
+mkdir -p $output_dir/dada2OutPut
+mkdir -p $output_dir/aligned2Tree
+mkdir -p $output_dir/taxClassification
+
+# Step 1: Quality check of raw reads
+conda activate readQC_env
+fastqc -o $output_dir/ReadQC/rawFASTQCreports -t 10 $input_dir/*fastq.gz
+
+# Step 2: Trim and filter sequences at 200bp
+forward_primer="TCGTCGGCAGCAGCGGTAA"
+
+trim_galore \
+  --core 8 \
+  --output_dir $output_dir/trimmedReads \
+  --clip_R1 20 \
+  --fastqc \
+ --adapter $forward_primer \
+  --length 200 \
+  $input_dir/*fastq.gz
+
+# Copy HTML trimmed file to view in local computer
+mv $output_dir/trimmedReads/*html $output_dir/trimmedFastQC/
+
+# Deactivate quality check environment
+conda deactivate
+
+# Activate QIIME2 environment
+conda activate qiime2_env
+
+# Step 1: Import single-end FASTQ files into QIIME 2 Artifact format
+qiime tools import \
+  --type 'SampleData[SequencesWithQuality]' \
+  --input-path $manifest \
+  --output-path $output_dir/single-end-demux.qza \
+  --input-format SingleEndFastqManifestPhred33V2
+
+qiime demux summarize \
+  --i-data  $output_dir/single-end-demux.qza \
+  --o-visualization $output_dir/single-end-demux.qzv
+
+# Step 2: Quality control and denoising with DADA2, getting ASVs
+qiime dada2 denoise-single \
+  --i-demultiplexed-seqs $output_dir/single-end-demux.qza \
+  --p-trunc-len 0 \
+  --p-n-threads 10 \
+  --o-table $output_dir/dada2OutPut/dada2_table.qza \
+  --o-representative-sequences $output_dir/dada2OutPut/dada2_rep_set.qza \
+  --o-denoising-stats $output_dir/dada2OutPut/dada2_stats.qza
+
+# Step 3: Generate feature table and representative sequences
+qiime metadata tabulate \
+  --m-input-file $output_dir/dada2OutPut/dada2_stats.qza \
+  --o-visualization $output_dir/dada2visualizations/dada2_stats_bymetadata.qzv
+
+qiime feature-table summarize \
+  --i-table $output_dir/dada2OutPut/dada2_table.qza \
+  --o-visualization $output_dir/dada2visualizations/dada2_table_summary.qzv
+
+# Step 4: Alpha diversity
+qiime diversity alpha-rarefaction \
+  --i-table $output_dir/dada2OutPut/dada2_table.qza \
+  --o-visualization $output_dir/alpha_rarefaction_curves.qzv \
+  --m-metadata-file $metadata \
+  --p-max-depth 7000
+
+# Step 5: Alignment and phylogenetic tree
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences $output_dir/dada2OutPut/dada2_rep_set.qza \
+  --o-alignment $output_dir/aligned2Tree/aligned_dada2_rep_set.qza \
+  --o-masked-alignment $output_dir/aligned2Tree/masked_aligned_dada2_rep_set.qza \
+  --o-tree $output_dir/aligned2Tree/unrooted_tree.qza \
+  --o-rooted-tree $output_dir/aligned2Tree/rooted_tree.qza \
+  --p-n-threads 10 \
+  --verbose
+
+# Step 6: Core metrics
+qiime diversity core-metrics-phylogenetic \
+  --i-table $output_dir/dada2OutPut/dada2_table.qza \
+  --i-phylogeny $output_dir/aligned2Tree/rooted_tree.qza \
+  --m-metadata-file $metadata \
+  --p-sampling-depth 5500 \
+  --output-dir $output_dir/core-metrics-results
+
+# Step 7: Taxonomic classification using Silva database
+#wget -nc -O $output_dir/silva-138-99-515-806-nb-classifier.qza https://data.qiime2.org/2022.2/common/silva-138-99-515-806-nb-classifier.qza
+
+qiime feature-classifier classify-sklearn \
+  --i-classifier $my_classifier \
+  --i-reads $output_dir/dada2OutPut/dada2_rep_set.qza \
+  --p-n-jobs 10 \
+  --o-classification $output_dir/taxClassification/dada2_rep_set_classified.qza
+
+qiime metadata tabulate \
+  --m-input-file $output_dir/taxClassification/dada2_rep_set_classified.qza \
+  --o-visualization $output_dir/taxClassification/taxonomy.qzv
+
+# Generate a taxonomic bar plot
+qiime taxa barplot \
+  --i-table $output_dir/dada2OutPut/dada2_table.qza \
+  --i-taxonomy $output_dir/taxClassification/dada2_rep_set_classified.qza \
+  --m-metadata-file $metadata \
+  --o-visualization $output_dir/all_taxa_bar_plots.qzv
+
+# Step 8: Data export exporting from qiime2 to use in R
+
+mkdir $output_dir/export
+
+#export count table 
+qiime tools export --input-path $output_dir/dada2OutPut/dada2_table.qza \
+--output-path $output_dir/export
+
+#convert the resulting .biom file to .tsv
+
+biom convert -i $output_dir/export/feature-table.biom -o $output_dir/export/table.tsv --to-tsv
+
+#export taxonomy/classification file to a tsv file
+qiime tools export \
+  --input-path $output_dir/taxClassification/dada2_rep_set_classified.qza \
+  --output-path $output_dir/export
+
+#export phylogenetic tree
+qiime tools export \
+  --input-path $output_dir/aligned2Tree/masked_aligned_dada2_rep_set.qza \
+  --output-path $output_dir/export
+
+# Deactivate QIIME2 environment
+conda deactivate
+
+# End of the script
+
