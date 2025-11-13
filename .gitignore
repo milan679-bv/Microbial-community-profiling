@@ -1,8 +1,11 @@
-# Ignore all files
-*
+# Ignore HTML output files
+*.html
 
-# Except R scripts
-!*.R
+# Ignore text files
+*.txt
 
-# Don't ignore .gitignore itself
-!.gitignore
+# Ignore Quarto source files
+*.qmd
+
+# Ignore generated output directories
+Sub_2_Chemistry_Seq_files/
